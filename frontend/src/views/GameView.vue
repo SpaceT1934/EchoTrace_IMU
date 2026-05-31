@@ -21,7 +21,9 @@ interface FallingItem {
   laneIdx: number;
   duration: number;
   rotate: number;
+  spawnedAt: number;
   state: 'falling' | 'correct' | 'wrong';
+  isTarget: boolean; // 出生时标定，终身不变：true=目标，false=干扰
 }
 
 const fallingItems = ref<FallingItem[]>([]);
@@ -59,8 +61,6 @@ let spawnTimer: number | undefined;
 let countdownTimer: number | undefined;
 let cueTimer: number | undefined;
 let offeredCheckTimer: number | undefined;
-let isUnmounted = false;
-
 const fallPool = computed<KitchenItem[]>(() => [...gameStore.selectedItems, ...gameStore.distractors]);
 const totalKinds = computed(() => gameStore.selectedItems.length);
 const activeIds = computed(() => new Set(activeItems.value.map((i) => i.id)));
@@ -82,13 +82,10 @@ watch(activeItems, (items) => {
   if (cueTimer) window.clearTimeout(cueTimer);
   cueTimer = window.setTimeout(() => { cueVisible.value = false; }, 4000);
 
-  // 新声音一响，立即掉出一个对应物品，不让用户干等
-  // 叠音也先出一个（取第一个还没在屏幕上的目标）
+  // 声音响起 → 每个发声物品各掉落一个（isTarget=true）
   if (isStarted.value && !isOver.value) {
-    const onScreen = new Set(fallingItems.value.filter((f) => f.state === 'falling').map((f) => f.item.id));
-    const target = items.find((i) => !onScreen.has(i.id)) ?? items[0];
-    if (target?.soundPath) {
-      pushFalling(target);
+    for (const item of items) {
+      if (item.soundPath) pushFalling(item, true);
     }
   }
 });
@@ -130,42 +127,22 @@ function getPhaseConfig(): { interval: number; itemDuration: number; activeBias:
   }
 }
 
-function spawnItem() {
-  if (isOver.value || fallPool.value.length === 0) return;
-
-  const cfg = getPhaseConfig();
-  const actIds = activeIds.value;
-  let item: KitchenItem;
-
-  // 最后 18 秒:强偏未 offered 的目标
-  if (remaining.value <= 18) {
-    const unofferedTargets = gameStore.selectedItems.filter(
-      (t) => !offeredIds.has(t.id) && t.soundPath,
-    );
-    if (unofferedTargets.length > 0 && Math.random() < 0.65) {
-      const activeUnoffered = unofferedTargets.filter((t) => actIds.has(t.id));
-      item =
-        activeUnoffered.length > 0
-          ? activeUnoffered[Math.floor(Math.random() * activeUnoffered.length)]
-          : unofferedTargets[Math.floor(Math.random() * unofferedTargets.length)];
-    } else if (actIds.size > 0 && Math.random() < cfg.activeBias) {
-      item = activeItems.value[Math.floor(Math.random() * activeItems.value.length)];
-    } else {
-      item = fallPool.value[Math.floor(Math.random() * fallPool.value.length)];
-    }
-  } else if (actIds.size > 0 && Math.random() < cfg.activeBias) {
-    item = activeItems.value[Math.floor(Math.random() * activeItems.value.length)];
-  } else {
-    item = fallPool.value[Math.floor(Math.random() * fallPool.value.length)];
-  }
-
-  pushFalling(item);
+// 只生成干扰项（目标由声音触发，见 watch(activeItems)）
+function spawnDistractor() {
+  if (isOver.value) return;
+  // 50% 概率出干扰项，50% 不生成（避免满屏干扰）
+  if (Math.random() > 0.5) return;
+  const distractors = fallPool.value.filter((i) => !i.soundPath);
+  if (distractors.length === 0) return;
+  const item = distractors[Math.floor(Math.random() * distractors.length)];
+  pushFalling(item, false);
 }
 
 // 把指定物品作为掉落物加入屏幕
-function pushFalling(item: KitchenItem) {
+// isTarget=true：发声物品（接了是对的），isTarget=false：干扰项（接了爆炸）
+function pushFalling(item: KitchenItem, isTarget = false) {
   const lane = pickLane();
-  if (lane === null) return; // 六道全忙，暂不生成
+  if (lane === null) return;
   const cfg = getPhaseConfig();
   const left = LANE_POSITIONS[lane] + (Math.random() - 0.5) * 6;
   fallingItems.value.push({
@@ -175,7 +152,9 @@ function pushFalling(item: KitchenItem) {
     laneIdx: lane,
     duration: cfg.itemDuration + Math.random() * 0.6,
     rotate: -14 + Math.random() * 28,
+    spawnedAt: performance.now(),
     state: 'falling',
+    isTarget,
   });
 }
 
@@ -217,7 +196,32 @@ function triggerExplosion(clientX: number, clientY: number) {
   }
 }
 
-// 通过 x,y 坐标接物品（碰撞检测和手动点击共用）
+// 筐碰撞：isTarget 出生时就定了，声音只是告诉你"谁在掉"
+function catchItemCollision(uid: number, clientX: number, clientY: number) {
+  if (isOver.value) return;
+  const fall = fallingItems.value.find((f) => f.uid === uid);
+  if (!fall || fall.state !== 'falling') return;
+
+  const isCorrect = fall.isTarget;
+
+  if (isCorrect) {
+    fall.state = 'correct';
+    correctCount.value += 1;
+    if (!collected.value.some((c) => c.id === fall.item.id)) {
+      collected.value.push(fall.item);
+    }
+    window.setTimeout(() => removeFalling(uid), 260);
+  } else {
+    fall.state = 'wrong';
+    wrongCount.value += 1;
+    triggerExplosion(clientX, clientY);
+    const ci = collected.value.findIndex((c) => c.id === fall.item.id);
+    if (ci !== -1) collected.value.splice(ci, 1);
+    window.setTimeout(() => removeFalling(uid), 360);
+  }
+}
+
+// 手动点击：只有当前正在发声的才算正确
 function catchItem(uid: number, clientX: number, clientY: number) {
   if (isOver.value) return;
   const fall = fallingItems.value.find((f) => f.uid === uid);
@@ -284,13 +288,15 @@ function checkBasketCollision() {
       const el = itemElMap.get(fall.uid);
       if (!el) continue;
       const fr = el.getBoundingClientRect();
+      // 最少下落 300ms 后才允许碰撞，避免新生即被抓
+      if (performance.now() - fall.spawnedAt < 300) continue;
       if (
         fr.left + fr.width / 2 > br.left &&
         fr.left + fr.width / 2 < br.right &&
         fr.top + fr.height / 2 > br.top &&
         fr.top + fr.height / 2 < br.bottom
       ) {
-        catchItem(fall.uid, br.left + br.width / 2, br.top + br.height / 2);
+        catchItemCollision(fall.uid, br.left + br.width / 2, br.top + br.height / 2);
       }
     }
   }
@@ -333,17 +339,10 @@ function goBack() {
 function startPlaying() {
   isReady.value = true;
 
-  // 每次尝试填满所有空闲轨道（六道各一个，忙的不重复放）
-  function spawnBatch() {
-    for (let i = 0; i < LANE_COUNT; i++) {
-      spawnItem();
-    }
-  }
-
-  // 递归定时，间隔随阶段自动变化
+  // 目标由声音触发（watch activeItems），这里只补干扰项
   function scheduleNext() {
     if (isOver.value) return;
-    spawnBatch();
+    spawnDistractor();
     const cfg = getPhaseConfig();
     spawnTimer = window.setTimeout(scheduleNext, cfg.interval);
   }
@@ -383,18 +382,18 @@ function userStartGame() {
   basket.start();
 }
 
-onMounted(async () => {
-  // 预先把所有掉落图片解码完成,避免掉落时才解码导致卡顿
-  const sources = fallPool.value.map((i) => i.image);
-  await Promise.all(sources.map(decodeImage));
-  // 解码期间组件可能已被卸载
-  if (isUnmounted) return;
+onMounted(() => {
+  // 立即显示「开始游戏」按钮，不等待图片解码
   isReady.value = true;
-  // 等用户点击"开始"才启动游戏(提供浏览器要求的手势)
+
+  // 后台异步解码图片，不阻塞用户操作
+  const sources = fallPool.value.map((i) => i.image);
+  Promise.all(sources.map(decodeImage)).catch(() => {
+    /* 解码失败不影响游戏 */
+  });
 });
 
 onBeforeUnmount(() => {
-  isUnmounted = true;
   if (spawnTimer) window.clearInterval(spawnTimer);
   if (countdownTimer) window.clearInterval(countdownTimer);
   if (cueTimer) window.clearTimeout(cueTimer);
@@ -457,7 +456,6 @@ onBeforeUnmount(() => {
         :key="fall.uid"
         :ref="(el) => trackItemEl(fall.uid, el as HTMLElement | null)"
         class="falling-item"
-        :class="fall.state"
         :data-uid="fall.uid"
         type="button"
         :style="{
@@ -465,6 +463,7 @@ onBeforeUnmount(() => {
           animationDuration: `${fall.duration}s`,
           '--rotate': `${fall.rotate}deg`,
         }"
+        :class="fall.state"
         :aria-label="fall.item.name"
         @pointerdown.prevent="catchItem(fall.uid, ($event as PointerEvent).clientX, ($event as PointerEvent).clientY)"
         @animationend="onFallEnd(fall.uid)"
