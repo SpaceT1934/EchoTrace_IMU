@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EchoTrace 排行榜管理</title>
+  <style>
+    :root {
+      color: #2c2416;
+      background: #faf6ee;
+      font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 32px 20px;
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 28px;
+      letter-spacing: 1px;
+    }
+    .sub {
+      margin: 0 0 24px;
+      color: #8c7b64;
+      font-size: 13px;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .auto-refresh {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+    .auto-refresh label { font-size: 13px; color: #6b5c48; }
+    .auto-refresh select {
+      border: 1px solid #d5c9b5;
+      border-radius: 8px;
+      padding: 5px 10px;
+      font: inherit;
+      font-size: 13px;
+      background: #fffdf8;
+    }
+    button {
+      min-height: 40px;
+      border: 0;
+      border-radius: 10px;
+      padding: 0 20px;
+      background: #e27820;
+      color: #fff;
+      font: inherit;
+      font-size: 14px;
+      font-weight: 800;
+      cursor: pointer;
+      box-shadow: 0 3px 0 #b05c15;
+    }
+    button:active { transform: translateY(1px); box-shadow: 0 2px 0 #b05c15; }
+    .status {
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #e8f0e4;
+      color: #417a30;
+    }
+    .status.err { background: #fce4e0; color: #b34030; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 4px 16px rgba(80, 50, 30, 0.1);
+    }
+    th {
+      padding: 12px 10px;
+      background: #3d2e1f;
+      color: #fff5e0;
+      font-size: 12px;
+      font-weight: 800;
+      text-align: left;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+    td {
+      padding: 10px;
+      font-size: 14px;
+      border-bottom: 1px solid #ede4d4;
+      background: #fffdf7;
+    }
+    tr:hover td { background: #fff8ea; }
+    .rank-no {
+      font-weight: 1000;
+      color: #e27820;
+      font-size: 18px;
+    }
+    .score-cell { font-weight: 900; font-size: 17px; color: #2c2416; }
+    .accuracy-cell { font-weight: 800; color: #2d8060; }
+    .time-cell { font-size: 12px; color: #8c7b64; }
+    .empty {
+      text-align: center;
+      padding: 48px 20px;
+      color: #b5a590;
+      font-size: 15px;
+    }
+    .footer {
+      margin-top: 18px;
+      text-align: center;
+      color: #b5a590;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>🏆 EchoTrace 排行榜</h1>
+<p class="sub">实时查看玩家成绩</p>
+
+<div class="toolbar">
+  <button onclick="loadData()">刷新</button>
+  <span id="status">连接中…</span>
+  <div class="auto-refresh">
+    <label for="interval">自动刷新</label>
+    <select id="interval" onchange="setAutoRefresh()">
+      <option value="0">关闭</option>
+      <option value="3" selected>3 秒</option>
+      <option value="5">5 秒</option>
+      <option value="10">10 秒</option>
+      <option value="30">30 秒</option>
+    </select>
+  </div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>玩家</th>
+      <th>得分</th>
+      <th>准确率</th>
+      <th>正确/错误</th>
+      <th>时间</th>
+    </tr>
+  </thead>
+  <tbody id="tbody">
+    <tr><td colspan="6" class="empty">加载中…</td></tr>
+  </tbody>
+</table>
+
+<p class="footer" id="footer"></p>
+
+<script>
+const API = '/api/leaderboard';
+let autoTimer = null;
+
+function fmtTime(ts) {
+  if (!ts) return '-';
+  const d = new Date(ts.replace(' ', 'T') + '+08:00');
+  if (isNaN(d.getTime())) return ts;
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+async function loadData() {
+  const status = document.getElementById('status');
+  const tbody = document.getElementById('tbody');
+  const footer = document.getElementById('footer');
+  try {
+    status.textContent = '刷新中…';
+    status.className = 'status';
+    const r = await fetch(API);
+    if (!r.ok) throw new Error(r.status);
+    const data = await r.json();
+    const rows = data.rows || [];
+
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无成绩数据</td></tr>';
+    } else {
+      tbody.innerHTML = rows.map((r, i) => `
+        <tr>
+          <td class="rank-no">${i + 1}</td>
+          <td>${es(r.playerName)}</td>
+          <td class="score-cell">${r.score}</td>
+          <td class="accuracy-cell">${r.accuracy}%</td>
+          <td>${r.correctCount} / ${r.wrongCount}</td>
+          <td class="time-cell">${fmtTime(r.createdAt)}</td>
+        </tr>
+      `).join('');
+    }
+
+    footer.textContent = `共 ${data.total || 0} 条提交记录`;
+    status.textContent = (data.total || 0) + ' 条';
+    status.className = 'status';
+  } catch (e) {
+    status.textContent = '加载失败';
+    status.className = 'status err';
+    footer.textContent = '检查后端是否已启动';
+  }
+}
+
+function es(s) { const el = document.createElement('span'); el.textContent = String(s); return el.innerHTML; }
+
+function setAutoRefresh() {
+  const v = parseInt(document.getElementById('interval').value || '0', 10);
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  if (v > 0) autoTimer = setInterval(loadData, v * 1000);
+}
+
+loadData();
+setAutoRefresh();
+</script>
+</body>
+</html>
